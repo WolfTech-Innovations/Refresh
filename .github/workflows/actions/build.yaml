@@ -1,0 +1,256 @@
+name: Minimal Win10 ISO with Boot Camp
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_name:
+        description: 'ISO Name'
+        default: 'Win10_MacBook_Minimal'
+        type: string
+
+env:
+  ISO_NAME: ${{ github.event.inputs.iso_name || 'Win10_MacBook_Minimal' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup directories
+        run: |
+          mkdir work, output, temp
+
+      - name: Download Windows 10 ISO
+        run: |
+          $url = "https://software.download.prss.microsoft.com/dbazure/Win10_22H2_English_x64.iso"
+          Invoke-WebRequest -Uri $url -OutFile "win10.iso"
+
+      - name: Download Boot Camp
+        run: |
+          $url = "https://support.apple.com/downloads/DL2077/en_US/BootCampESD.pkg"
+          Invoke-WebRequest -Uri $url -OutFile "bootcamp.pkg" -ErrorAction SilentlyContinue
+          if (-not (Test-Path "bootcamp.pkg")) {
+            $url = "https://support.apple.com/downloads/DL1837/en_US/BootCamp6.1.13.zip"
+            Invoke-WebRequest -Uri $url -OutFile "bootcamp.zip"
+            Expand-Archive "bootcamp.zip" -DestinationPath "bootcamp_temp"
+          }
+
+      - name: Mount and copy ISO
+        run: |
+          Mount-DiskImage -ImagePath "win10.iso"
+          $drive = (Get-Volume -FileSystemLabel "*WIN*").DriveLetter + ":"
+          robocopy "$drive\" "work\" /E /R:1
+          Dismount-DiskImage -ImagePath "win10.iso"
+
+      - name: Create autounattend.xml
+        run: |
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="windowsPE">
+              <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <DiskConfiguration>
+                  <Disk wcm:action="add">
+                    <DiskID>0</DiskID>
+                    <WillWipeDisk>true</WillWipeDisk>
+                    <CreatePartitions>
+                      <CreatePartition wcm:action="add">
+                        <Order>1</Order>
+                        <Type>Primary</Type>
+                        <Size>350</Size>
+                      </CreatePartition>
+                      <CreatePartition wcm:action="add">
+                        <Order>2</Order>
+                        <Type>Primary</Type>
+                        <Extend>true</Extend>
+                      </CreatePartition>
+                    </CreatePartitions>
+                    <ModifyPartitions>
+                      <ModifyPartition wcm:action="add">
+                        <Order>1</Order>
+                        <PartitionID>1</PartitionID>
+                        <Label>System</Label>
+                        <Format>NTFS</Format>
+                        <Active>true</Active>
+                      </ModifyPartition>
+                      <ModifyPartition wcm:action="add">
+                        <Order>2</Order>
+                        <PartitionID>2</PartitionID>
+                        <Label>Windows</Label>
+                        <Format>NTFS</Format>
+                      </ModifyPartition>
+                    </ModifyPartitions>
+                  </Disk>
+                </DiskConfiguration>
+                <ImageInstall>
+                  <OSImage>
+                    <InstallTo>
+                      <DiskID>0</DiskID>
+                      <PartitionID>2</PartitionID>
+                    </InstallTo>
+                    <InstallToAvailablePartition>false</InstallToAvailablePartition>
+                  </OSImage>
+                </ImageInstall>
+                <UserData>
+                  <AcceptEula>true</AcceptEula>
+                  <FullName>User</FullName>
+                  <Organization>Personal</Organization>
+                </UserData>
+              </component>
+            </settings>
+            <settings pass="offlineServicing">
+              <component name="Microsoft-Windows-LUA-Settings" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <EnableLUA>false</EnableLUA>
+              </component>
+            </settings>
+            <settings pass="oobeSystem">
+              <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                <OOBE>
+                  <HideEULAPage>true</HideEULAPage>
+                  <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                  <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                  <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                  <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                  <NetworkLocation>Work</NetworkLocation>
+                  <ProtectYourPC>3</ProtectYourPC>
+                  <SkipUserOOBE>true</SkipUserOOBE>
+                  <SkipMachineOOBE>true</SkipMachineOOBE>
+                </OOBE>
+                <UserAccounts>
+                  <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                      <Password>
+                        <Value></Value>
+                        <PlainText>true</PlainText>
+                      </Password>
+                      <Description>Default User</Description>
+                      <DisplayName>User</DisplayName>
+                      <Group>Administrators</Group>
+                      <Name>User</Name>
+                    </LocalAccount>
+                  </LocalAccounts>
+                </UserAccounts>
+                <AutoLogon>
+                  <Password>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                  </Password>
+                  <Enabled>true</Enabled>
+                  <LogonCount>3</LogonCount>
+                  <Username>User</Username>
+                </AutoLogon>
+              </component>
+            </settings>
+          </unattend>
+          '@ | Out-File "work\autounattend.xml" -Encoding UTF8
+
+      - name: Strip Windows bloat
+        run: |
+          # Remove install.esd, keep only install.wim
+          Remove-Item "work\sources\install.esd" -ErrorAction SilentlyContinue
+          
+          # Mount install.wim
+          dism /Mount-Wim /WimFile:work\sources\install.wim /index:6 /MountDir:temp
+          
+          # Remove bloatware but keep Edge and Defender
+          $bloat = @(
+            "*3dbuilder*", "*bingfinance*", "*bingfoodanddrink*", "*binghealthandfitness*",
+            "*bingnews*", "*bingsports*", "*bingtravel*", "*bingweather*", "*camera*",
+            "*candy*", "*commsphone*", "*drawboardpdf*", "*facebook*", "*freshpaint*",
+            "*getstarted*", "*king*", "*march*", "*minecraft*", "*netflix*", "*office*",
+            "*onenote*", "*people*", "*phone*", "*photos*", "*skypeapp*", "*solitaire*",
+            "*soundrecorder*", "*twitter*", "*windowsalarms*", "*windowscommunications*",
+            "*windowsmaps*", "*windowsphone*", "*xbox*", "*zunevideo*", "*zune*",
+            "*mixedreality*", "*3dviewer*", "*paint3d*", "*sticky*"
+          )
+          
+          foreach ($app in $bloat) {
+            dism /Image:temp /Remove-ProvisionedAppxPackage /PackageName:$app 2>$null
+          }
+          
+          # Remove Windows features
+          $features = @(
+            "WorkFolders-Client", "Printing-XPSServices-Features", "MediaPlayback",
+            "WindowsMediaPlayer", "Internet-Explorer-Optional-amd64"
+          )
+          
+          foreach ($feature in $features) {
+            dism /Image:temp /Disable-Feature /FeatureName:$feature /Remove 2>$null
+          }
+          
+          # Unmount and save
+          dism /Unmount-Wim /MountDir:temp /Commit
+
+      - name: Add Boot Camp drivers
+        run: |
+          if (Test-Path "bootcamp_temp") {
+            Copy-Item "bootcamp_temp\*" "work\$OEM$\$$\Drivers\" -Recurse -Force
+          }
+          if (Test-Path "bootcamp.pkg") {
+            # Extract pkg if available
+            mkdir "work\$OEM$\$$\BootCamp"
+          }
+
+      - name: Create setup script
+        run: |
+          @'
+          @echo off
+          rem Auto-install Boot Camp and optimize for MacBook
+          
+          echo Installing Boot Camp drivers...
+          if exist "C:\Drivers" (
+              pnputil /add-driver "C:\Drivers\*.inf" /subdirs /install
+          )
+          
+          echo Optimizing for MacBook hardware...
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power" /v "CsEnabled" /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v "HiberbootEnabled" /t REG_DWORD /d 0 /f
+          
+          echo Disabling unnecessary services...
+          sc config "DiagTrack" start= disabled
+          sc config "dmwappushservice" start= disabled
+          sc config "WSearch" start= disabled
+          sc config "MapsBroker" start= disabled
+          
+          echo Setup complete!
+          '@ | Out-File "work\setup.bat" -Encoding ASCII
+
+      - name: Optimize WIM
+        run: |
+          dism /Export-Image /SourceImageFile:work\sources\install.wim /SourceIndex:6 /DestinationImageFile:work\sources\install2.wim /Compress:max
+          Remove-Item "work\sources\install.wim"
+          Rename-Item "work\sources\install2.wim" "install.wim"
+
+      - name: Remove unnecessary files
+        run: |
+          $removeFiles = @(
+            "work\sources\lang",
+            "work\support",
+            "work\upgrade",
+            "work\autorun.inf",
+            "work\setup.exe"
+          )
+          foreach ($file in $removeFiles) {
+            Remove-Item $file -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Create bootable ISO
+        run: |
+          $isoPath = "output\${{ env.ISO_NAME }}.iso"
+          oscdimg -m -o -u2 -udfver102 -l"${{ env.ISO_NAME }}" -bootdata:2#p0,e,bwork\boot\etfsboot.com#pEF,e,bwork\efi\microsoft\boot\efisys.bin work $isoPath
+          
+          if (Test-Path $isoPath) {
+            $size = [math]::Round((Get-Item $isoPath).Length / 1GB, 2)
+            Write-Host "✅ ISO created: $size GB"
+          }
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ISO_NAME }}
+          path: output/${{ env.ISO_NAME }}.iso
+          retention-days: 30
