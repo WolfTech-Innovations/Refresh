@@ -5,7 +5,7 @@ on:
     inputs:
       iso_name:
         description: 'ISO Name'
-        default: 'Win10_MacBook_Minimal'
+        default: 'MacRefresh10'
         type: string
 
 env:
@@ -26,7 +26,7 @@ jobs:
 
       - name: Download Windows 10 ISO
         run: |
-          $url = "https://software.download.prss.microsoft.com/dbazure/Win10_22H2_English_x64.iso"
+          $url = "https://archive.org/download/tiny-10-23-h2/tiny10%20x64%2023h2.iso"
           Invoke-WebRequest -Uri $url -OutFile "win10.iso"
 
       - name: Download Boot Camp
